@@ -1,0 +1,30 @@
+import { FullBox } from '#/box';
+import { parseHex16 } from '#/parser';
+import type { MultiBufferStream } from '#/buffer';
+
+export class psshBox extends FullBox {
+  static override readonly fourcc = 'pssh' as const;
+  box_name = 'ProtectionSystemSpecificHeaderBox' as const;
+
+  system_id: string;
+  kid: Array<string>;
+  protection_data?: Uint8Array;
+
+  parse(stream: MultiBufferStream) {
+    this.parseFullHeader(stream);
+    this.system_id = parseHex16(stream);
+
+    this.kid = [];
+    if (this.version > 0) {
+      const count = stream.readUint32();
+      for (let i = 0; i < count; i++) {
+        this.kid[i] = parseHex16(stream);
+      }
+    }
+
+    const datasize = stream.readUint32();
+    if (datasize > 0) {
+      this.protection_data = stream.readUint8Array(datasize);
+    }
+  }
+}

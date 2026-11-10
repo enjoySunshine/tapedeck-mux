@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "target": "es2022",
+    "module": "es2022",
+    "resolveJsonModule": true,
+    "types": ["vitest/globals", "node"]
+  },
+  "include": ["./tests/**/*"],
+  "references": [{ "path": "./tsconfig.lib.json" }]
+}

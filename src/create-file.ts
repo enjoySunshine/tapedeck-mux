@@ -1,0 +1,17 @@
+/*
+ * Copyright (c) 2012-2013. Telecom ParisTech/TSI/MM/GPAC Cyril Concolato
+ * License: BSD-3-Clause (see LICENSE file)
+ */
+
+import { MultiBufferStream } from '#/buffer';
+import { ISOFile, type ISOFileParseOptions } from '#/isofile';
+
+export function createFile(
+  keepMdatData = false,
+  stream?: MultiBufferStream,
+  options?: ISOFileParseOptions,
+) {
+  /* Boolean indicating if bytes containing media data should be kept in memory */
+  const file = new ISOFile(stream, !keepMdatData, options);
+  return file;
+}

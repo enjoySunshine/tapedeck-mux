@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+    <head>
+    	<meta charset="UTF-8">
+		<title>MP4Box.js - JavaScript MP4 Reader - Diff tool</title>
+
+		<!-- Include basic JQuery and JQuery UI files -->
+		<script src="lib/jquery/jquery.js"></script>
+  		<link href="lib/jquery-ui/jquery-ui.min.css" rel="stylesheet" type="text/css">
+		<script src="lib/jquery-ui/jquery-ui.min.js"></script>
+		<script src="lib/jquery-ui/jquery-ui.slider.custom.js"></script>
+
+		<!-- Include JQuery-based Fancytree skin, library, and extensions -->
+  		<link href="lib/fancytree/ui.fancytree.min.css" rel="stylesheet" type="text/css">
+  		<script src="lib/fancytree/jquery.fancytree-all.min.js" type="text/javascript"></script>
+
+		<style type="text/css">
+
+		/* JQuery UI Styles */
+		.ui-selectmenu-button {
+		    vertical-align: middle;
+		}
+
+		.fields_diff {
+			background-color: orange;
+		}
+
+		.children_diff {
+			background-color: yellow;
+		}
+		</style>
+		<link rel="stylesheet" href="style.css" />
+    </head>
+	<body>
+		<!-- GitHub Stat Buttons -->
+		<div style="display: flex; align-items: center; justify-content: space-between;">
+			<div>
+				<h3 style="margin-bottom: 0;">MP4Box.js / ISOBMFF Diff Tool (see <a href="./">other demos</a>)</h3>
+				<p style="margin-top: 4px;">Client-side tool: files are processed locally in your browser and not uploaded to any server</p>
+			</div>
+			<div>
+			</div>
+		</div>
+
+		<div id="menubar" style="clear: both;"></div>
+		<div id="resulttabs" style="clear: both;"></div>
+		<script src="../dist/mp4box.all.iife.js"></script>
+		<script>
+			for (const key in MP4Box)
+				if (MP4Box.hasOwnProperty(key))
+					window[key] = MP4Box[key];
+		</script>
+		<script src="sample-urls.js"></script>
+		<script src="downloader.js"></script>
+		<script src="boxHtmlTable.js"></script>
+		<script src="boxfancytree.js"></script>
+		<script src="ui-helper.js"></script>
+		<script src="filediff.js"></script>
+	</body>
+</html>

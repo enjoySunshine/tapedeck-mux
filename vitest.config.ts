@@ -1,0 +1,18 @@
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  resolve: { tsconfigPaths: true },
+  test: {
+    globals: true,
+    include: ['tests/**/*.test.ts'],
+    globalSetup: ['tests/setup.ts'],
+    typecheck: {
+      tsconfig: './tsconfig.test.json',
+    },
+    coverage: {
+      provider: 'v8',
+      reporter: ['html-spa', 'text-summary'],
+      include: ['src/**/*.ts', 'entries/**/*.ts'],
+    },
+  },
+});
