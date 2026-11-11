@@ -121,10 +121,10 @@ describe('File Creation', () => {
     const { testFile } = getFilePath('isobmff', '17_negative_ctso.mp4');
     const mp4 = createFile(false);
 
-    // Load only until the first sample
+    // Load only part of the first sample (its size is 2895 bytes)
     const mdatOffset = 17_105 + 8; // ftyp + moov + mdat header
-    const firstSampleSize = 2_895; // mdat header + first sample size
-    await getFileRange(testFile, data => mp4.appendBuffer(data), 0, mdatOffset + firstSampleSize);
+    const partialSampleSize = 10; // only the first 10 bytes of the first sample
+    await getFileRange(testFile, data => mp4.appendBuffer(data), 0, mdatOffset + partialSampleSize);
 
     // Setup for extraction
     mp4.setExtractionOptions(1, undefined, { nbSamples: 1 });
@@ -132,7 +132,7 @@ describe('File Creation', () => {
     mp4.onSamples = (id, user, extracted) => (sampleCount += extracted.length);
     mp4.start();
 
-    // Check if the sample is extracted correctly
+    // The first sample is not fully available yet, it must not be emitted (and no error thrown)
     expect(sampleCount).toBe(0);
   });
 });

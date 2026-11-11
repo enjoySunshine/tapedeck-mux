@@ -57,6 +57,8 @@ export class mdatBox extends Box {
   static override readonly fourcc = 'mdat' as const;
   box_name = 'MediaDataBox' as const;
   stream?: MultiBufferStream;
+  /** Number of mdat payload bytes already copied into `stream` (incremental transfer) */
+  transferredLength?: number;
 }
 
 export class idatBox extends Box {

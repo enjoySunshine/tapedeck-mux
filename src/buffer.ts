@@ -320,14 +320,6 @@ export class MultiBufferStream extends DataStream {
       const abuffer = this.buffers[i];
       if (abuffer && abuffer.fileStart <= filePosition) {
         index = i;
-        if (markAsUsed) {
-          if (abuffer.fileStart + abuffer.byteLength <= filePosition) {
-            abuffer.usedBytes = abuffer.byteLength;
-          } else {
-            abuffer.usedBytes = filePosition - abuffer.fileStart;
-          }
-          this.logBufferLevel();
-        }
       } else {
         break;
       }
@@ -341,6 +333,22 @@ export class MultiBufferStream extends DataStream {
     const abuffer = this.buffers[index];
     if (abuffer.fileStart + abuffer.byteLength >= filePosition) {
       Log.debug('MultiBufferStream', 'Found position in existing buffer #' + index);
+      /* Only mark bytes as used once the seeked position is actually reachable. Marking them
+         when the position is not available yet would garbage-collect data that the parser
+         still needs to form a contiguous range, forcing the downloader to re-fetch the same
+         bytes and potentially looping forever on small chunk downloads. */
+      if (markAsUsed) {
+        for (let j = fromStart === true ? 0 : this.bufferIndex; j < index; j++) {
+          const previousBuffer = this.buffers[j];
+          previousBuffer.usedBytes = previousBuffer.byteLength;
+        }
+        if (abuffer.fileStart + abuffer.byteLength <= filePosition) {
+          abuffer.usedBytes = abuffer.byteLength;
+        } else {
+          abuffer.usedBytes = filePosition - abuffer.fileStart;
+        }
+        this.logBufferLevel();
+      }
       return index;
     } else {
       return -1;
@@ -383,6 +391,23 @@ export class MultiBufferStream extends DataStream {
     if (index !== -1) {
       return this.findEndContiguousBuf(index);
     } else {
+      /* The position is not held by any buffer. Because used buffers are garbage collected
+         (see cleanBuffers), the position may fall inside a gap between two buffered ranges.
+         Returning the position unchanged in that case would make a conforming downloader,
+         which always fetches starting from the returned position, request bytes it already
+         has and loop forever. Instead, skip over any fully buffered (possibly contiguous)
+         ranges preceding the position, so that the returned position is the first byte
+         that still needs to be fetched and the download always makes forward progress. */
+      for (let i = 0; i < this.buffers.length; i++) {
+        const buffer = this.buffers[i];
+        const bufferEnd = buffer.fileStart + buffer.byteLength;
+        if (bufferEnd <= pos) {
+          /* this whole buffered range precedes the requested position, skip it */
+          pos = Math.max(pos, bufferEnd);
+        } else {
+          break;
+        }
+      }
       return pos;
     }
   }

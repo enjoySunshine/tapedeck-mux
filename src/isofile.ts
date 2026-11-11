@@ -503,6 +503,14 @@ export class ISOFile<TSegmentUser = unknown, TSampleUser = unknown> {
       return;
     }
 
+    /* Position immediately after the contiguous data available at the time this buffer is
+       appended. Garbage collection (cleanBuffers) may remove fully used buffers below, making
+       this information unavailable later, so capture it now. A conforming downloader always
+       fetches its next range starting at the returned position, so the returned value must
+       never point inside the data it already has, otherwise the same bytes would be requested
+       over and over again. */
+    const deliveredEnd = this.stream.getEndFilePositionAfter(ab.fileStart);
+
     /* Parse whatever is in the existing buffers */
     this.parse();
 
@@ -553,6 +561,23 @@ export class ISOFile<TSegmentUser = unknown, TSampleUser = unknown> {
         /* No valid buffer has been parsed yet, we cannot know what to parse next */
         nextFileStart = 0;
       }
+    }
+    /* Guarantee forward progress: the parser may legitimately need a byte located inside a
+       range that was already delivered and then garbage collected (e.g. the end of an mdat
+       box skipped while looking for the moov box, or data of a sample not yet requested).
+       Asking for such a position would make the downloader re-fetch bytes it already has and
+       loop without ever reaching the end of file. Clamp the returned position to the end of
+       the delivered contiguous range; the parser keeps its internal state and will resume
+       from the requested position once enough new bytes have been downloaded. */
+    if (nextFileStart < deliveredEnd) {
+      Log.debug(
+        'ISOFile',
+        'Next parse position ' +
+          nextFileStart +
+          ' is already buffered, advancing next fetch position to ' +
+          deliveredEnd,
+      );
+      nextFileStart = deliveredEnd;
     }
     if (this.sidx) {
       if (this.onSidx && !this.sidxSent) {
@@ -2026,114 +2051,136 @@ export class ISOFile<TSegmentUser = unknown, TSampleUser = unknown> {
       return sample;
     }
 
-    /* The sample has only been partially fetched, we need to check in all buffers */
-    while (true) {
-      let stream = this.stream;
-      let index = stream.findPosition(true, sample.offset + sample.alreadyRead, false);
-      let buffer: MP4BoxBuffer;
-      let fileStart: number;
-      if (index > -1) {
-        // We haven't yet transferred the sample data to mdat
-        buffer = stream.buffers[index];
-        fileStart = buffer.fileStart;
-      } else {
-        // We might have already transferred the sample data to mdat
-        for (const mdat of this.mdats) {
-          if (!mdat.stream) {
-            Log.debug(
-              'ISOFile',
-              'mdat stream not yet fully read for #' + this.mdats.indexOf(mdat) + ' mdat',
-            );
-            continue; // mdat stream not yet fully read
-          }
-          index = mdat.stream.findPosition(
-            true,
-            sample.offset + sample.alreadyRead - mdat.start - mdat.hdr_size,
-            false,
-          );
-          if (index > -1) {
-            stream = mdat.stream;
-            buffer = mdat.stream.buffers[index];
-            fileStart = mdat.start + mdat.hdr_size + buffer.fileStart;
-            break;
-          }
+    /* The sample has only been partially fetched, we need to check in all buffers.
+       Locate the next needed byte, first in the main stream and, if it is not readable there
+       (not downloaded yet, or held by a fully consumed buffer awaiting garbage collection),
+       in the stream of the mdat box that contains it. */
+    const locateBuffer = (
+      wantedFilePosition: number,
+    ): { stream: MultiBufferStream; buffer: MP4BoxBuffer; fileStart: number } | undefined => {
+      const mainIndex = this.stream.findPosition(true, wantedFilePosition, false);
+      if (mainIndex > -1) {
+        const mainBuffer = this.stream.buffers[mainIndex];
+        const offsetInBuffer = wantedFilePosition - mainBuffer.fileStart;
+        /* Read from the main stream whenever the byte is actually present in memory.
+           usedBytes is only a garbage-collection hint, not a read barrier: a fully used buffer
+           that has not been collected yet still contains valid data. */
+        if (offsetInBuffer >= 0 && offsetInBuffer < mainBuffer.byteLength) {
+          return {
+            stream: this.stream,
+            buffer: mainBuffer,
+            fileStart: mainBuffer.fileStart,
+          };
         }
       }
 
-      if (buffer) {
-        const lengthAfterStart =
-          buffer.byteLength - (sample.offset + sample.alreadyRead - fileStart);
-        if (sample.size - sample.alreadyRead <= lengthAfterStart) {
-          /* the (rest of the) sample is entirely contained in this buffer */
-
+      /* Fall back to the mdat streams (used when mdat data is kept instead of discarded) */
+      for (const mdat of this.mdats) {
+        if (!mdat.stream) {
           Log.debug(
             'ISOFile',
-            'Getting sample #' +
-              sampleNum +
-              ' data (alreadyRead: ' +
-              sample.alreadyRead +
-              ' offset: ' +
-              (sample.offset + sample.alreadyRead - fileStart) +
-              ' read size: ' +
-              (sample.size - sample.alreadyRead) +
-              ' full size: ' +
-              sample.size +
-              ')',
+            'mdat stream not yet fully read for #' + this.mdats.indexOf(mdat) + ' mdat',
           );
-
-          DataStream.memcpy(
-            sample.data.buffer,
-            sample.alreadyRead,
-            buffer,
-            sample.offset + sample.alreadyRead - fileStart,
-            sample.size - sample.alreadyRead,
-          );
-
-          /* update the number of bytes used in this buffer and check if it needs to be removed */
-          buffer.usedBytes += sample.size - sample.alreadyRead;
-          stream.logBufferLevel();
-
-          sample.alreadyRead = sample.size;
-
-          return sample;
-        } else {
-          /* the sample does not end in this buffer */
-
-          if (lengthAfterStart === 0) return;
-
-          Log.debug(
-            'ISOFile',
-            'Getting sample #' +
-              sampleNum +
-              ' partial data (alreadyRead: ' +
-              sample.alreadyRead +
-              ' offset: ' +
-              (sample.offset + sample.alreadyRead - fileStart) +
-              ' read size: ' +
-              lengthAfterStart +
-              ' full size: ' +
-              sample.size +
-              ')',
-          );
-
-          // NOTE:  this was an error before
-          //        it used to be DataStream.memcpy({...})
-          DataStream.memcpy(
-            sample.data.buffer,
-            sample.alreadyRead,
-            buffer,
-            sample.offset + sample.alreadyRead - fileStart,
-            lengthAfterStart,
-          );
-          sample.alreadyRead += lengthAfterStart;
-
-          /* update the number of bytes used in this buffer and check if it needs to be removed */
-          buffer.usedBytes += lengthAfterStart;
-          stream.logBufferLevel();
-
-          /* keep looking in the next buffer */
+          continue;
         }
-      } else return;
+        /* Transfer bytes that may have arrived after the mdat box was completed, so that a
+           sample spanning several small download chunks can always be assembled */
+        this.transferMdatData(mdat);
+        const localPosition = wantedFilePosition - mdat.start - mdat.hdr_size;
+        const mdatIndex = mdat.stream.findPosition(true, localPosition, false);
+        if (mdatIndex > -1) {
+          const mdatBuffer = mdat.stream.buffers[mdatIndex];
+          return {
+            stream: mdat.stream,
+            buffer: mdatBuffer,
+            fileStart: mdat.start + mdat.hdr_size + mdatBuffer.fileStart,
+          };
+        }
+      }
+      return undefined;
+    };
+
+    while (true) {
+      const wantedFilePosition = sample.offset + sample.alreadyRead;
+      const located = locateBuffer(wantedFilePosition);
+      if (!located) {
+        /* the next needed byte is not available in any stream yet: wait for more data */
+        return;
+      }
+      const { stream, buffer, fileStart } = located;
+      const lengthAfterStart = buffer.byteLength - (wantedFilePosition - fileStart);
+      if (lengthAfterStart === 0) {
+        /* should not happen given locateBuffer, but guard against an infinite loop */
+        return;
+      }
+      if (sample.size - sample.alreadyRead <= lengthAfterStart) {
+        /* the (rest of the) sample is entirely contained in this buffer */
+
+        Log.debug(
+          'ISOFile',
+          'Getting sample #' +
+            sampleNum +
+            ' data (alreadyRead: ' +
+            sample.alreadyRead +
+            ' offset: ' +
+            (wantedFilePosition - fileStart) +
+            ' read size: ' +
+            (sample.size - sample.alreadyRead) +
+            ' full size: ' +
+            sample.size +
+            ')',
+        );
+
+        DataStream.memcpy(
+          sample.data.buffer,
+          sample.alreadyRead,
+          buffer,
+          wantedFilePosition - fileStart,
+          sample.size - sample.alreadyRead,
+        );
+
+        /* update the number of bytes used in this buffer and check if it needs to be removed */
+        buffer.usedBytes += sample.size - sample.alreadyRead;
+        stream.logBufferLevel();
+
+        sample.alreadyRead = sample.size;
+
+        return sample;
+      } else {
+        /* the sample does not end in this buffer */
+
+        Log.debug(
+          'ISOFile',
+          'Getting sample #' +
+            sampleNum +
+            ' partial data (alreadyRead: ' +
+            sample.alreadyRead +
+            ' offset: ' +
+            (wantedFilePosition - fileStart) +
+            ' read size: ' +
+            lengthAfterStart +
+            ' full size: ' +
+            sample.size +
+            ')',
+        );
+
+        // NOTE:  this was an error before
+        //        it used to be DataStream.memcpy({...})
+        DataStream.memcpy(
+          sample.data.buffer,
+          sample.alreadyRead,
+          buffer,
+          wantedFilePosition - fileStart,
+          lengthAfterStart,
+        );
+        sample.alreadyRead += lengthAfterStart;
+
+        /* update the number of bytes used in this buffer and check if it needs to be removed */
+        buffer.usedBytes += lengthAfterStart;
+        stream.logBufferLevel();
+
+        /* keep looking in the next buffer */
+      }
     }
   }
 
@@ -2555,7 +2602,7 @@ export class ISOFile<TSegmentUser = unknown, TSampleUser = unknown> {
       /* indicate that the parsing should start from the end of the box */
       this.lastBoxStartPosition = box.start + box.size;
       /* let's see if we have the end of the box in the other buffers */
-      const found = this.stream.seek(box.start + box.size, false, this.discardMdatData);
+      const found = this.stream.seek(box.start + box.size, false, false);
       if (found) {
         /* we can now transfer the data to the mdat box stream */
         this.transferMdatData();
@@ -2606,15 +2653,24 @@ export class ISOFile<TSegmentUser = unknown, TSampleUser = unknown> {
           /* There were not enough bytes in the buffer to parse the box type and length,
 				   the next fetch should retrieve those missing bytes, i.e. the next bytes after this buffer */
           this.nextParsePosition = this.stream.getEndPosition();
-        } else {
-          /* we had enough bytes to parse size and type of the incomplete box
-				   if we haven't found yet the moov box, skip this one and try the next one
-				   if we have found the moov box, let's continue linear parsing */
-          if (this.moovStartFound) {
-            this.nextParsePosition = this.stream.getEndPosition();
-          } else {
+        } else if (this.moovStartFound || ret.type === 'mdat') {
+          /* Incomplete box whose size and type are known.
+             - once the moov box has been found, continue linear parsing, the box data is needed
+             - an mdat box before the moov may be skipped (its data, if referenced, will be
+               re-fetched later based on sample offsets): this is the moov-at-end optimization.
+             Any other incomplete box (e.g. moov itself or metadata boxes such as 'bloc')
+             cannot be skipped: jumping to its end would leave a permanent gap that prevents
+             the box from ever being parsed, stalling the downloader. Fetch the following
+             bytes linearly until the whole box is available. */
+          if (!this.moovStartFound && ret.type === 'mdat') {
             this.nextParsePosition = this.stream.getPosition() + ret.size;
+          } else {
+            this.nextParsePosition = this.stream.getEndPosition();
           }
+        } else {
+          /* incomplete, non-mdat box while still looking for the moov:
+             keep downloading linearly from the end of the contiguous buffered range */
+          this.nextParsePosition = this.stream.getEndPosition();
         }
         return false;
       }
@@ -2627,7 +2683,14 @@ export class ISOFile<TSegmentUser = unknown, TSampleUser = unknown> {
   }
 
   /**
-   * Transfer the data of the mdat box to its stream
+   * Transfer the data of the mdat box to its stream.
+   *
+   * The transfer is incremental and can be called repeatedly: only the bytes of the mdat that
+   * have been downloaded since the previous call are copied into the mdat stream. This matters
+   * when data is fetched in small chunks: the end of an mdat box may be reached (and its stream
+   * created) while some of its data bytes are still missing, either because they are in a chunk
+   * not yet downloaded or because the moov-at-end handling skipped a range. Without incremental
+   * transfer, samples referencing those bytes would be stranded and silently dropped.
    * @param mdat the mdat box to use
    */
   transferMdatData(inMdat?: mdatBox) {
@@ -2641,47 +2704,43 @@ export class ISOFile<TSegmentUser = unknown, TSampleUser = unknown> {
       return;
     }
 
-    // Start by finding the starting buffer
-    const startBufferIndex = this.stream.findPosition(true, mdat.start + mdat.hdr_size, false);
-    const endBufferIndex = this.stream.findPosition(true, mdat.start + mdat.size, false);
+    const dataStart = mdat.start + mdat.hdr_size;
+    const dataEnd = mdat.start + mdat.size;
 
-    if (startBufferIndex === -1 || endBufferIndex === -1) {
-      Log.warn('ISOFile', "Cannot transfer 'mdat' data, start or end buffer not found");
-      return;
+    if (!mdat.stream) {
+      mdat.stream = new MultiBufferStream();
+      /* number of mdat payload bytes already transferred into mdat.stream */
+      mdat.transferredLength = 0;
     }
 
-    // Transfer the data
-    mdat.stream = new MultiBufferStream();
-    for (let i = startBufferIndex; i <= endBufferIndex; i++) {
-      const buffer = this.stream.buffers[i];
-      const startOffset =
-        i === startBufferIndex ? mdat.start + mdat.hdr_size - buffer.fileStart : 0;
-      const endOffset =
-        i === endBufferIndex ? mdat.start + mdat.size - buffer.fileStart : buffer.byteLength;
-      if (endOffset > startOffset) {
-        Log.debug(
-          'ISOFile',
-          "Transferring 'mdat' data from buffer #" +
-            i +
-            ' (' +
-            startOffset +
-            ' to ' +
-            endOffset +
-            ')',
-        );
-
-        const transferSize = endOffset - startOffset;
-        const newBuffer = new MP4BoxBuffer(transferSize);
-        const lastPosition = mdat.stream.getAbsoluteEndPosition();
-        DataStream.memcpy(newBuffer, 0, buffer, startOffset, transferSize);
-        newBuffer.fileStart = lastPosition;
-
-        // Insert the new buffer into the mdat stream
-        mdat.stream.insertBuffer(newBuffer);
-
-        // Consume the bytes in the original stream
-        buffer.usedBytes += transferSize;
+    /* Only contiguous data starting at the current transfer frontier can be appended, so that
+       the mdat stream keeps a valid, gap-free byte layout used by sample extraction. */
+    while ((mdat.transferredLength ?? 0) < dataEnd - dataStart) {
+      const filePosition = dataStart + (mdat.transferredLength ?? 0);
+      const bufferIndex = this.stream.findPosition(true, filePosition, false);
+      if (bufferIndex === -1) {
+        /* next needed byte not downloaded yet, more chunks may fill it in later */
+        return;
       }
+      const buffer = this.stream.buffers[bufferIndex];
+      const startOffset = filePosition - buffer.fileStart;
+      const availableLength = buffer.byteLength - startOffset;
+      const remainingLength = dataEnd - filePosition;
+      const transferSize = Math.min(availableLength, remainingLength);
+      if (transferSize <= 0) {
+        return;
+      }
+
+      const newBuffer = new MP4BoxBuffer(transferSize);
+      DataStream.memcpy(newBuffer, 0, buffer, startOffset, transferSize);
+      newBuffer.fileStart = mdat.stream.getAbsoluteEndPosition();
+      mdat.stream.insertBuffer(newBuffer);
+
+      /* The main stream still owns the bytes; mark them used so they can be garbage collected
+         now that the mdat stream holds a copy. */
+      buffer.usedBytes = Math.max(buffer.usedBytes, startOffset + transferSize);
+
+      mdat.transferredLength = (mdat.transferredLength ?? 0) + transferSize;
     }
   }
 
@@ -2689,7 +2748,7 @@ export class ISOFile<TSegmentUser = unknown, TSampleUser = unknown> {
   processIncompleteMdat() {
     /* we are in the parsing of an incomplete mdat box */
     const box = this.parsingMdat;
-    const found = this.stream.seek(box.start + box.size, false, this.discardMdatData);
+    const found = this.stream.seek(box.start + box.size, false, false);
     if (found) {
       Log.debug('ISOFile', "Found 'mdat' end in buffered data");
       /* we can now transfer the data to the mdat box stream */
@@ -2709,8 +2768,12 @@ export class ISOFile<TSegmentUser = unknown, TSampleUser = unknown> {
 
   /** @bundle isofile-advanced-parsing.js */
   restoreParsePosition() {
-    /* Reposition at the start position of the previous box not entirely parsed */
-    return this.stream.seek(this.lastBoxStartPosition, true, this.discardMdatData);
+    /* Reposition at the start position of the previous box not entirely parsed.
+       Do not mark the skipped range as used here: the bytes of an mdat box must remain
+       available until sample extraction actually consumes them, otherwise they would be
+       garbage collected while a sample spanning several small download chunks is only
+       partially assembled, silently corrupting or dropping sample data. */
+    return this.stream.seek(this.lastBoxStartPosition, true, false);
   }
 
   /** @bundle isofile-advanced-parsing.js */
